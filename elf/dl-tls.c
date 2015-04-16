@@ -34,14 +34,12 @@
 
 
 /* Out-of-memory handler.  */
-#ifdef SHARED
 static void
 __attribute__ ((__noreturn__))
 oom (void)
 {
   _dl_fatal_printf ("cannot allocate memory for thread-local data: ABORT\n");
 }
-#endif
 
 
 size_t
@@ -400,6 +398,10 @@ _dl_allocate_tls_init (void *result)
     /* The memory allocation failed.  */
     return NULL;
 
+  /* Make sure we are alone. TLS allocation and dlopen() cannot happen
+     concurrently. */
+  __rtld_lock_lock_recursive (GL(dl_load_write_lock));
+
   dtv_t *dtv = GET_DTV (result);
   struct dtv_slotinfo_list *listp;
   size_t total = 0;
@@ -409,6 +411,52 @@ _dl_allocate_tls_init (void *result)
      TLS.  For those which are dynamically loaded we add the values
      indicating deferred allocation.  */
   listp = GL(dl_tls_dtv_slotinfo_list);
+
+  /* check if current dtv is big enough */
+  if (dtv[-1].counter < GL(dl_tls_max_dtv_idx))
+  {
+    dtv_t *newp;
+    size_t newsize = GL(dl_tls_max_dtv_idx) + DTV_SURPLUS;
+    size_t oldsize = dtv[-1].counter;
+
+    if (
+#ifdef SHARED
+	    dtv == GL(dl_initial_dtv)
+#else
+	    0
+#endif
+	    )
+    {
+      /* This is the initial dtv that was allocated
+      during rtld startup using the dl-minimal.c
+      malloc instead of the real malloc.  We can't
+      free it, we have to abandon the old storage.  */
+      newp = malloc ((2 + newsize) * sizeof (dtv_t));
+      if (newp == NULL)
+	    oom ();
+      memcpy (newp, &dtv[-1], (2 + oldsize) * sizeof (dtv_t));
+    }
+    else
+    {
+      newp = realloc(&dtv[-1], (2 + newsize) * sizeof (dtv_t));
+      if (newp == NULL)
+	    oom();
+    }
+
+    newp[0].counter = newsize;
+
+    /* Clear the newly allocated part.  */
+    memset (newp + 2 + oldsize, '\0', (newsize - oldsize) * sizeof (dtv_t));
+
+    /* Point dtv to the generation counter.  */
+    dtv = &newp[1];
+
+    /* Install this new dtv in the given thread */
+    INSTALL_DTV (result, newp);
+
+    assert(dtv[-1].counter >= GL(dl_tls_max_dtv_idx));
+  }
+
   while (1)
     {
       size_t cnt;
@@ -437,6 +485,7 @@ _dl_allocate_tls_init (void *result)
 	    {
 	      /* For dynamically loaded modules we simply store
 		 the value indicating deferred allocation.  */
+	      assert (map->l_tls_modid <= dtv[-1].counter);
 	      dtv[map->l_tls_modid].pointer.val = TLS_DTV_UNALLOCATED;
 	      dtv[map->l_tls_modid].pointer.is_static = false;
 	      continue;
@@ -471,6 +520,9 @@ _dl_allocate_tls_init (void *result)
 
   /* The DTV version is up-to-date now.  */
   dtv[0].counter = maxgen;
+
+  /* Release lock */
+  __rtld_lock_unlock_recursive (GL(dl_load_write_lock));
 
   return result;
 }
