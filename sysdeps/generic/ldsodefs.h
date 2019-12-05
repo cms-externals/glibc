@@ -395,7 +395,7 @@ struct rtld_global
    distributions to coordinate the usage of static TLS.  Any user of this
    resource is effectively coordinating a global resource since this
    surplus is allocated for each thread at startup.  */
-#define DTV_SURPLUS	(32)
+#define DTV_SURPLUS	(64)
 
   /* Initial dtv of the main thread, not allocated with normal malloc.  */
   EXTERN void *_dl_initial_dtv;
